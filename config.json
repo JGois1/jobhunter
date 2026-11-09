@@ -1,0 +1,13 @@
+{
+  "fontes_ativas": ["gupy", "vagas.com", "infojobs", "jobzi", "indeed"],
+  "termos_busca": ["estágio ti", "estágio desenvolvimento", "estágio desenvolvedor", "estágio programação", "estágio dados", "estágio software", "estágio sistemas", "estágio tecnologia"],
+  "gupy_cidade": "Rio de Janeiro",
+  "cidades_aceitas": ["Rio de Janeiro", "Niterói", "RJ"],
+  "minhas_skills": ["c#", ".net", "asp.net", "python", "sql", "sql server", "postgres*", "pandas", "power bi", "angular", "azure", "aws", "docker", "git", "ci/cd", "api*", "backend", "back end", "full stack", "fullstack", "engenharia de dados", "banco de dados", "analise e desenvolvimento de sistemas"],
+  "modelo_claude": "claude-opus-5-5",
+  "nota_minima_trello": 6,
+  "quadro_trello": "Estágios TI - RJ",
+  "navegador": "msedge",
+  "palavras_ti_titulo": ["ti", "tecnologia*", "desenvolvedor*", "desenvolvimento de software", "desenvolvimento web", "desenvolvimento de sistemas", "software", "programacao", "programador*", "dados", "data", "sistemas", "computacao", "informatica", "dev", "developer", "backend", "back end", "frontend", "front end", "full stack", "fullstack", ".net", "c#", "python", "java", "sql", "cloud", "devops", "infraestrutura", "suporte tecnico", "bi", "business intelligence", "analytics", "qa", "ia", "inteligencia artificial", "machine learning", "ciberseguranca", "seguranca da informacao", "redes", "web", "mobile", "ux"],
+  "tecnologias_descricao": [".net", "c#", "python", "java", "javascript", "typescript", "sql", "postgres*", "mysql", "power bi", "angular", "react", "node*", "azure", "aws", "docker", "git", "api*", "cloud", "devops", "linux", "pandas", "etl", "machine learning", "engenharia de software", "banco de dados", "programacao", "ciencia da computacao", "analise e desenvolvimento de sistemas", "sistemas de informacao"]
+}
