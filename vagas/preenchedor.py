@@ -44,7 +44,11 @@ EXCECOES = {
 }
 PROIBIDO = re.compile(r"senha|password|cpf|rg\b|busca|pesquis|search|cupom|captcha", re.I)
 RE_CURRICULO = re.compile(r"curr[ií]culo|curriculum|\bcv\b|resume|anexo|attach", re.I)
-RE_BOTAO_CANDIDATAR = re.compile(r"^\s*(candidat(ar|e)[- ]?(se|me)?|quero me candidatar|aplicar( para a vaga)?|apply( now)?|inscrever[- ]se)\s*$", re.I)
+# Só botões que ABREM o formulário. "Candidatura rápida", "1 clique", "Easy apply" ficam de fora
+# de propósito: costumam enviar na hora, sem você revisar.
+RE_BOTAO_CANDIDATAR = re.compile(
+    r"^\s*(candidat(ar|e)[- ]?(se|me)?( (a|à|para) (esta |essa )?vaga)?|quero me candidatar|"
+    r"candidatura completa|aplicar( para a vaga)?|apply( now)?|inscrever[- ]se)\s*$", re.I)
 
 # JS que lista os campos visíveis com o melhor rótulo possível para cada um.
 JS_CAMPOS = r"""() => {
@@ -80,6 +84,21 @@ JS_CAMPOS = r"""() => {
 }"""
 
 
+JS_TEXTOS = r"""() => {
+  const out = []; let i = 0;
+  document.querySelectorAll('[data-assistente-txt]').forEach(e => e.removeAttribute('data-assistente-txt'));
+  for (const e of document.querySelectorAll('button, a, [role=button], span, div, p')) {
+    const t = (e.innerText || '').replace(/\s+/g, ' ').trim();
+    if (!t || t.length > 50) continue;
+    const r = e.getBoundingClientRect(); if (!r.width || !r.height) continue;
+    // fica só com o elemento mais interno que tem esse texto
+    if ([...e.children].some(c => (c.innerText || '').replace(/\s+/g, ' ').trim() === t)) continue;
+    e.setAttribute('data-assistente-txt', String(i)); out.push({ idx: String(i++), texto: t });
+  }
+  return out;
+}"""
+
+
 def carregar_respostas(caminho: Path) -> list[tuple[list[str], str]]:
     """Lê respostas.md: '## kw1 | kw2' seguido do texto."""
     secoes, atual, texto = [], None, []
@@ -101,17 +120,30 @@ class Preenchedor:
         self.respostas = respostas
         self.escritor = escritor  # função (pergunta) -> texto, usando o Claude; opcional
 
-    def clicar_candidatar(self, pagina) -> bool:
-        """Na página da vaga, clica no botão de 'Candidatar-se' (só abre o formulário)."""
-        for el in pagina.locator("button, a, [role=button]").all():
-            try:
-                if el.is_visible() and RE_BOTAO_CANDIDATAR.match(el.inner_text(timeout=500) or ""):
-                    el.click()
-                    pagina.wait_for_load_state("domcontentloaded")
-                    return True
-            except Exception:
-                continue
-        return False
+    def textos_botoes(self, pagina) -> list[dict]:
+        """Textos curtos visíveis da página (o elemento mais interno com cada texto)."""
+        try:
+            return pagina.evaluate(JS_TEXTOS)
+        except Exception:
+            return []
+
+    def clicar_candidatar(self, pagina, espera=10) -> bool:
+        """Na página da vaga, clica no botão de candidatura (só abre o formulário).
+        Espera até `espera` s: muitos sites só mostram o botão depois de carregar o login."""
+        import time
+        fim = time.time() + espera
+        while True:
+            for b in self.textos_botoes(pagina):
+                if RE_BOTAO_CANDIDATAR.match(b["texto"]):
+                    try:
+                        pagina.locator(f'[data-assistente-txt="{b["idx"]}"]').click(timeout=3000)
+                        pagina.wait_for_load_state("domcontentloaded")
+                        return True
+                    except Exception:
+                        continue
+            if time.time() > fim:
+                return False
+            pagina.wait_for_timeout(1000)
 
     def preencher(self, pagina) -> dict:
         """Preenche todos os frames da página. Devolve um relatório do que fez."""

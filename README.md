@@ -35,9 +35,12 @@ pip install -r requirements.txt
 python aplicar.py --login
 ```
 
-O `--login` abre um navegador **separado do seu Edge normal** com Gupy, vagas.com, InfoJobs e
-Indeed. É um Edge comum (sem automação), então "Entrar com Google" funciona. Entre nos sites
-que quiser e **feche a janela** quando terminar. Os logins ficam salvos em `dados/navegador`.
+O `--login` abre um navegador **separado do seu Edge normal** com Gupy, vagas.com, InfoJobs,
+Indeed, Solides, Catho, Empregos.com.br e CIEE (o Jobzi não tem login: as vagas dele levam
+para esses sites). É um Edge comum (sem automação), então "Entrar com Google" funciona. Entre nos sites
+que quiser, **volte ao terminal e aperte Enter** (não feche o Edge antes: é no Enter que os
+logins são copiados). Eles ficam em `dados/sessao.json` e no perfil `dados/navegador`.
+Se você entrar em algum site durante o `aplicar.py`, esse login também é guardado.
 Se algum site pedir login de novo no futuro, é só repetir o `--login`.
 Na Gupy, vale completar o perfil, porque é ele que vai para as empresas.
 
