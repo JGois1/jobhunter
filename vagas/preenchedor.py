@@ -40,7 +40,8 @@ EXCECOES = {
     "curso": r"\b(complementar|extracurricular|idioma)\b",
     "cidade": r"\b(nascimento|natal)\b",
     "pais": r"\b(nascimento)\b",
-    "email": r"\b(confirm)",  # confirmação de e-mail: você digita (muitos sites bloqueiam colar)
+    # confirmação de e-mail: você digita (muitos sites bloqueiam colar); e-mail secundário: não é o principal
+    "email": r"(confirm|secondary|secundari|alternativ|recado|outro)",
 }
 PROIBIDO = re.compile(r"senha|password|cpf|rg\b|busca|pesquis|search|cupom|captcha", re.I)
 RE_CURRICULO = re.compile(r"curr[ií]culo|curriculum|\bcv\b|resume|anexo|attach", re.I)
@@ -49,6 +50,22 @@ RE_CURRICULO = re.compile(r"curr[ií]culo|curriculum|\bcv\b|resume|anexo|attach"
 RE_BOTAO_CANDIDATAR = re.compile(
     r"^\s*(candidat(ar|e)[- ]?(se|me)?( (a|à|para) (esta |essa )?vaga)?|quero me candidatar|"
     r"candidatura completa|aplicar( para a vaga)?|apply( now)?|inscrever[- ]se)\s*$", re.I)
+# Botões que só passam para a próxima etapa do formulário (o assistente pode clicar)...
+RE_BOTAO_AVANCAR = re.compile(
+    r"^\s*(avan[cç]ar|pr[oó]xim[oa]( etapa| passo)?|continuar|seguir|next|"
+    r"salvar e (continuar|avan[cç]ar|seguir))\s*(>|›|→)?\s*$", re.I)
+# ...e botões de ENVIO: quando um destes aparece, o assistente para e quem clica é você.
+RE_BOTAO_ENVIAR = re.compile(
+    r"(^|[^a-z])(enviar|envie|finalizar|concluir|confirmar|submeter|submit|send|finish)([^a-z]|$)|"
+    r"candidatar", re.I)
+# "Entrar"/"Login" no cabeçalho = você não está logado naquele site
+RE_BOTAO_ENTRAR = re.compile(
+    r"^\s*(entrar|entre|login|log in|fazer login|acessar( conta| minha conta)?|sign in|"
+    r"j[aá] tenho (conta|cadastro))\s*$", re.I)
+# rótulos de etapa/título que aparecem e mudam quando o formulário avança
+JS_ASSINATURA = r"""() => location.href + '|' +
+  [...document.querySelectorAll('label, legend, h1, h2, h3, h4, [aria-current], [class*=active]')]
+    .map(e => (e.innerText || '').trim()).join('|').slice(0, 4000)"""
 
 # JS que lista os campos visíveis com o melhor rótulo possível para cada um.
 JS_CAMPOS = r"""() => {
@@ -87,13 +104,25 @@ JS_CAMPOS = r"""() => {
 JS_TEXTOS = r"""() => {
   const out = []; let i = 0;
   document.querySelectorAll('[data-assistente-txt]').forEach(e => e.removeAttribute('data-assistente-txt'));
+  // ícones feitos com fonte (Material Icons etc.) aparecem como texto: "edit_document", "send"...
+  const ICONE = /icon|material|symbol|\bfa-|glyph/i;
+  const texto = e => { if (!e.querySelector('*')) return e.innerText || '';
+    const c = e.cloneNode(true); c.querySelectorAll('*').forEach(x => {
+      if (ICONE.test(x.getAttribute('class') || '')) x.remove(); });
+    return c.textContent || ''; };
   for (const e of document.querySelectorAll('button, a, [role=button], span, div, p')) {
-    const t = (e.innerText || '').replace(/\s+/g, ' ').trim();
+    if (ICONE.test(e.getAttribute('class') || '')) continue;
+    const t = texto(e).replace(/\s+/g, ' ').replace(/^([a-z0-9]+_[a-z0-9_]+ )+/, '').trim();
     if (!t || t.length > 50) continue;
     const r = e.getBoundingClientRect(); if (!r.width || !r.height) continue;
     // fica só com o elemento mais interno que tem esse texto
-    if ([...e.children].some(c => (c.innerText || '').replace(/\s+/g, ' ').trim() === t)) continue;
-    e.setAttribute('data-assistente-txt', String(i)); out.push({ idx: String(i++), texto: t });
+    if ([...e.children].some(c => texto(c).replace(/\s+/g, ' ').replace(/^([a-z0-9]+_[a-z0-9_]+ )+/, '').trim() === t)) continue;
+    e.setAttribute('data-assistente-txt', String(i));
+    out.push({ idx: String(i++), texto: t, clicavel: !!e.closest('button, a, [role=button]') });
+  }
+  for (const e of document.querySelectorAll('input[type=submit], input[type=button]')) {
+    const r = e.getBoundingClientRect(); if (!r.width || !r.height || !e.value) continue;
+    e.setAttribute('data-assistente-txt', String(i)); out.push({ idx: String(i++), texto: e.value.trim(), clicavel: true });
   }
   return out;
 }"""
@@ -133,7 +162,8 @@ class Preenchedor:
         import time
         fim = time.time() + espera
         while True:
-            for b in self.textos_botoes(pagina):
+            botoes = sorted(self.textos_botoes(pagina), key=lambda b: not b.get("clicavel"))
+            for b in botoes:                     # botões de verdade primeiro
                 if RE_BOTAO_CANDIDATAR.match(b["texto"]):
                     try:
                         pagina.locator(f'[data-assistente-txt="{b["idx"]}"]').click(timeout=3000)
@@ -145,14 +175,77 @@ class Preenchedor:
                 return False
             pagina.wait_for_timeout(1000)
 
+    def tela_de_login(self, pagina) -> bool:
+        """A tela atual é de login (tem campo de senha visível)?"""
+        for frame in pagina.frames:
+            try:
+                if frame.locator("input[type=password]:visible").count():
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def parece_deslogado(self, pagina) -> bool:
+        """Há um botão/link "Entrar"/"Login" à vista (você não está logado neste site)?"""
+        return any(b.get("clicavel") and RE_BOTAO_ENTRAR.match(b["texto"])
+                   for b in self.textos_botoes(pagina))
+
+    def esperar_campos(self, pagina, espera=10) -> bool:
+        """Espera o formulário aparecer (muitos sites carregam os campos depois da página)."""
+        import time
+        fim = time.time() + espera
+        while time.time() < fim:
+            for frame in pagina.frames:
+                try:
+                    if frame.evaluate(JS_CAMPOS):
+                        return True
+                except Exception:
+                    pass
+            pagina.wait_for_timeout(700)
+        return False
+
+    def assinatura(self, pagina) -> str:
+        try:
+            return pagina.evaluate(JS_ASSINATURA)
+        except Exception:
+            return ""
+
+    def avancar(self, pagina) -> tuple[str, str]:
+        """Tenta passar para a próxima etapa do formulário.
+
+        Devolve (resultado, texto do botão):
+          ("envio", "Enviar candidatura")  botão de envio à vista: é a última etapa, quem clica é você
+          ("avancou", "Avançar")           cliquei e a página mudou
+          ("travou", "Avançar")            cliquei mas nada mudou (o site deve estar pedindo algo)
+          ("nada", "")                     não achei botão de próxima etapa
+        """
+        botoes = [b for b in self.textos_botoes(pagina) if b.get("clicavel")]
+        for b in botoes:
+            if RE_BOTAO_ENVIAR.search(b["texto"]) and not RE_BOTAO_AVANCAR.match(b["texto"]):
+                return "envio", b["texto"]
+        alvo = next((b for b in botoes if RE_BOTAO_AVANCAR.match(b["texto"])), None)
+        if not alvo:
+            return "nada", ""
+        antes = self.assinatura(pagina)
+        try:
+            pagina.locator(f'[data-assistente-txt="{alvo["idx"]}"]').click(timeout=3000)
+        except Exception:
+            return "travou", alvo["texto"]
+        for _ in range(12):                     # até ~6 s para a próxima etapa aparecer
+            pagina.wait_for_timeout(500)
+            if self.assinatura(pagina) != antes:
+                return "avancou", alvo["texto"]
+        return "travou", alvo["texto"]
+
     def preencher(self, pagina) -> dict:
         """Preenche todos os frames da página. Devolve um relatório do que fez."""
-        rel = {"preenchidos": [], "perguntas": [], "pendentes": []}
+        rel = {"preenchidos": [], "perguntas": [], "pendentes": [], "campos": 0}
         for frame in pagina.frames:
             try:
                 campos = frame.evaluate(JS_CAMPOS)
             except Exception:
                 continue
+            rel["campos"] += len(campos)
             for c in campos:
                 self._campo(frame, c, rel)
         return rel
