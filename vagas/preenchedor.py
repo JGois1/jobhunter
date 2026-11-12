@@ -40,6 +40,7 @@ EXCECOES = {
     "curso": r"\b(complementar|extracurricular|idioma)\b",
     "cidade": r"\b(nascimento|natal)\b",
     "pais": r"\b(nascimento)\b",
+    "pretensao_salarial": r"\b(ultima|ultimo|atual|anterior|recebia|recebe|recebeu)\b",
     # confirmação de e-mail: você digita (muitos sites bloqueiam colar); e-mail secundário: não é o principal
     "email": r"(confirm|secondary|secundari|alternativ|recado|outro)",
 }
@@ -71,18 +72,26 @@ JS_ASSINATURA = r"""() => location.href + '|' +
 JS_CAMPOS = r"""() => {
   const vis = e => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e);
                      return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
+  const LETRAS = /[A-Za-zÀ-ú]{3,}/;
   const rotulo = e => {
-    let t = [];
-    if (e.id) { const l = document.querySelector(`label[for="${CSS.escape(e.id)}"]`); if (l) t.push(l.innerText); }
-    const pai = e.closest('label'); if (pai) t.push(pai.innerText);
-    for (const a of ['aria-label', 'placeholder', 'name', 'id', 'title']) if (e.getAttribute(a)) t.push(e.getAttribute(a));
+    let forte = [], fraco = [];               // forte: rótulo de verdade; fraco: placeholder, name, id
+    if (e.id) { const l = document.querySelector(`label[for="${CSS.escape(e.id)}"]`); if (l) forte.push(l.innerText); }
+    const pai = e.closest('label'); if (pai) forte.push(pai.innerText);
+    if (e.getAttribute('aria-label')) forte.push(e.getAttribute('aria-label'));
     const lb = e.getAttribute('aria-labelledby');
-    if (lb) lb.split(' ').forEach(i => { const x = document.getElementById(i); if (x) t.push(x.innerText); });
-    if (t.join('').trim().length < 3) {           // procura texto logo acima do campo
-      let n = e; for (let i = 0; i < 4 && n; i++) { n = n.parentElement;
-        const txt = n && n.innerText && n.innerText.trim(); if (txt && txt.length < 300) { t.push(txt); break; } }
+    if (lb) lb.split(' ').forEach(i => { const x = document.getElementById(i); if (x) forte.push(x.innerText); });
+    for (const a of ['placeholder', 'name', 'id', 'title']) if (e.getAttribute(a)) fraco.push(e.getAttribute(a));
+    forte = forte.filter(t => t && LETRAS.test(t));
+    if (!forte.length) {   // sem rótulo: a pergunta costuma ser o texto logo acima ("1. Qual a sua...?")
+      let n = e;
+      for (let i = 0; i < 5 && n; i++) {
+        n = n.parentElement;
+        const txt = n && n.innerText ? n.innerText.trim() : '';
+        if (txt.length >= 400) break;          // já pegou o formulário inteiro: desiste
+        if (LETRAS.test(txt)) { forte.push(txt); break; }   // ignora textos tipo "0/250"
+      }
     }
-    return t.join(' | ').replace(/\s+/g, ' ').slice(0, 300);
+    return [...forte, ...fraco].join(' | ').replace(/\s+/g, ' ').slice(0, 300);
   };
   const out = [];
   document.querySelectorAll('input, textarea, select').forEach((e, i) => {
@@ -94,8 +103,14 @@ JS_CAMPOS = r"""() => {
     const valor = tipo === 'file' ? (e.files.length ? 'x' : '')
                 : tipo === 'select' ? (e.selectedIndex > 0 ? e.value : '')   // 1ª opção costuma ser "Selecione"
                 : (e.value || '');
-    out.push({ idx: String(i), tipo, rotulo: rotulo(e), valor,
-               opcoes: tipo === 'select' ? [...e.options].map(o => o.text) : [] , obrigatorio: e.required });
+    const combo = tipo !== 'select' && tipo !== 'textarea' && !!(
+      e.getAttribute('role') === 'combobox' || e.getAttribute('aria-autocomplete') ||
+      ['listbox', 'true', 'menu'].includes(e.getAttribute('aria-haspopup') || '') ||
+      e.closest('[role=combobox], [aria-haspopup=listbox]') ||
+      /escolha|selecione|select an option/i.test(e.getAttribute('placeholder') || ''));
+    out.push({ idx: String(i), tipo, rotulo: rotulo(e), valor, combo,
+               opcoes: tipo === 'select' ? [...e.options].map(o => o.text) : [] ,
+               obrigatorio: e.required || e.getAttribute('aria-required') === 'true' });
   });
   return out;
 }"""
@@ -131,6 +146,8 @@ JS_TEXTOS = r"""() => {
 def carregar_respostas(caminho: Path) -> list[tuple[list[str], str]]:
     """Lê respostas.md: '## kw1 | kw2' seguido do texto."""
     secoes, atual, texto = [], None, []
+    if not caminho.exists():
+        return secoes
     for linha in caminho.read_text(encoding="utf-8").splitlines():
         if linha.startswith("## "):
             if atual:
@@ -143,11 +160,54 @@ def carregar_respostas(caminho: Path) -> list[tuple[list[str], str]]:
     return secoes
 
 
+# palavras que não dizem nada sobre o assunto da pergunta
+STOP = set("""a o as os um uma uns umas de da do das dos em no na nos nas para pra por com e ou
+que qual quais quanto quanta quantos quantas sua seu suas seus voce voces tem teria possui ja ao
+aos se sobre como me lhe isso esta este essa esse nesta neste nessa nesse ate mais muito sim nao
+favor descreva informe digite responda""".split())
+RE_PLACEHOLDER = re.compile(r"digite|escreva|sua resposta|type here|insira|responda aqui", re.I)
+# dados que fazem sentido como resposta curta a uma pergunta ("Qual sua pretensão salarial?")
+SEGUROS_EM_PERGUNTA = {"pretensao_salarial", "ingles", "previsao_formatura", "periodo", "linkedin", "github"}
+
+
+def pergunta_de(rotulo: str) -> str:
+    """O pedaço do rótulo que é a pergunta (tira placeholder, name, contador '0/250', '1.')."""
+    rotulo = re.sub(r"^\s*\d+\s*[.)\-–]\s*", "", rotulo)
+    for parte in rotulo.split("|"):
+        p = parte.strip()
+        if re.search(r"[A-Za-zÀ-ú]{3,}", p) and not RE_PLACEHOLDER.search(p) and "." not in p.replace(". ", ""):
+            return re.sub(r"\b\d+\s*/\s*\d+\b", "", p).strip()
+    return rotulo.split("|")[0].strip()
+
+
+def palavras_chave(texto: str) -> list[str]:
+    return [w for w in normalizar(texto).split() if w not in STOP and len(w) > 1 and not w.isdigit()]
+
+
+def salvar_aprendida(caminho: Path, secoes: list, pergunta: str, resposta: str):
+    """Guarda (ou atualiza) a sua resposta para uma pergunta em respostas_aprendidas.md."""
+    chave = " ".join(palavras_chave(pergunta))
+    completa = normalizar(pergunta)
+    secoes[:] = [(ks, t) for ks, t in secoes if chave not in ks]      # resposta nova substitui
+    secoes.insert(0, ([chave, completa], resposta))
+    linhas = ["# Respostas que você deu nos formulários (o assistente aprende sozinho).",
+              "# Edite ou apague à vontade. Formato: '## palavras da pergunta', depois a resposta.", ""]
+    for ks, t in secoes:
+        linhas.append("## " + " | ".join(k for k in ks if k))
+        linhas += [(" " + l if l.startswith("#") else l) for l in t.splitlines()]
+        linhas.append("")
+    caminho.write_text("\n".join(linhas), encoding="utf-8")
+
+
 class Preenchedor:
-    def __init__(self, dados: dict, respostas: list, escritor=None):
+    def __init__(self, dados: dict, respostas: list, escritor=None,
+                 aprendidas: list | None = None, arquivo_aprendidas: Path | None = None):
         self.dados = dados
         self.respostas = respostas
         self.escritor = escritor  # função (pergunta) -> texto, usando o Claude; opcional
+        self.aprendidas = aprendidas if aprendidas is not None else []   # compartilhada entre vagas
+        self.arquivo_aprendidas = arquivo_aprendidas
+        self.abertas = {}         # perguntas abertas desta tela: (frame, idx) -> (pergunta, o que eu escrevi)
 
     def textos_botoes(self, pagina) -> list[dict]:
         """Textos curtos visíveis da página (o elemento mais interno com cada texto)."""
@@ -263,22 +323,31 @@ class Preenchedor:
                     rel["preenchidos"].append(("currículo", Path(pdf).name))
                 return
 
-            if c["tipo"] == "textarea":
-                texto = self._resposta_aberta(rotulo)
-                if texto:
-                    el.fill(texto)
-                    rel["perguntas"].append((rotulo[:80], "preenchida"))
-                else:
-                    rel["perguntas"].append((rotulo[:80], "EM BRANCO — responda você"))
-                return
-
             chave = next((k for padrao, k in MAPA if re.search(padrao, norm)), None)
             if chave in EXCECOES and re.search(EXCECOES[chave], norm):
                 chave = None
+            pergunta = pergunta_de(rotulo)
+            opcional = bool(re.search(r"opcional|optional|nao obrigatori", norm))
+            if c.get("combo"):
+                # lista suspensa feita com <input> (Gupy etc.): digitar texto livre quebraria o campo
+                if c["obrigatorio"] and not opcional:
+                    rel["pendentes"].append(f"{pergunta[:70]} (escolha na lista)")
+                return
+            # textarea, ou campo de texto sem dado conhecido cuja "etiqueta" é uma pergunta
+            if c["tipo"] == "textarea" or (c["tipo"] != "select" and not chave and "?" in pergunta):
+                texto = self._resposta_aberta(pergunta, chave)
+                if texto:
+                    el.fill(texto)
+                    rel["perguntas"].append((pergunta[:80], "preenchida — confira"))
+                elif not opcional:        # opcional em branco: deixo quieto e sigo em frente
+                    rel["perguntas"].append((pergunta[:80], "EM BRANCO — responda no site"))
+                self.abertas[(frame.url, c["idx"])] = (pergunta, texto)   # se você responder, eu aprendo
+                return
+
             valor = self.dados.get(chave, "") if chave else ""
             if not valor:
-                if c["obrigatorio"]:
-                    rel["pendentes"].append(rotulo[:80])
+                if c["obrigatorio"] and not opcional:
+                    rel["pendentes"].append(pergunta[:80])
                 return
 
             if c["tipo"] == "select":
@@ -297,15 +366,63 @@ class Preenchedor:
         except Exception as e:
             rel["pendentes"].append(f"{rotulo[:60]} (erro: {str(e)[:60]})")
 
-    def _resposta_aberta(self, pergunta: str) -> str:
+    @staticmethod
+    def _melhor(secoes, pergunta: str) -> str:
+        """A seção cuja chave mais combina com a pergunta. Todas as palavras da chave precisam
+        aparecer (ou 75% delas, em chaves de 3+ palavras). Chave mais específica vence."""
+        palavras = set(normalizar(pergunta).split())
+        melhor, nota = "", 0.0
+        for chaves, texto in secoes:
+            for k in chaves:
+                kw = k.split()
+                if not kw or not texto:
+                    continue
+                dentro = sum(w in palavras for w in kw)
+                if dentro == len(kw) or (len(kw) >= 3 and dentro / len(kw) >= 0.75):
+                    n = dentro + (0.5 if dentro == len(kw) else 0)
+                    if n > nota:
+                        melhor, nota = texto, n
+        return melhor
+
+    def _resposta_aberta(self, pergunta: str, chave_dado: str | None = None) -> str:
+        # 1) o que você já respondeu antes numa pergunta parecida
+        texto = self._melhor(self.aprendidas, pergunta)
+        if texto:
+            return texto
+        # 2) um dado seu, se a pergunta é curta e direta ("Qual sua pretensão salarial?")
+        if chave_dado and (chave_dado in SEGUROS_EM_PERGUNTA or len(palavras_chave(pergunta)) <= 5):
+            valor = self.dados.get(chave_dado, "")
+            if valor:
+                return valor
+        # 3) Claude (se tiver a chave), 4) textos padrão do respostas.md
         if self.escritor:
             try:
-                return self.escritor(pergunta)
+                texto = self.escritor(pergunta)
+                if texto:
+                    return texto
             except Exception as e:
                 print(f"   [claude] falhou ({e}); usando respostas.md")
-        palavras = set(normalizar(pergunta).split())
-        for chaves, texto in self.respostas:
-            # "conte sobre voce" casa com "Conte um pouco sobre você": basta ter todas as palavras
-            if any(k and set(k.split()) <= palavras for k in chaves):
-                return texto
-        return ""
+        return self._melhor(self.respostas, pergunta)
+
+    def aprender(self, pagina) -> list[str]:
+        """Lê o que você escreveu nas perguntas abertas desta tela e guarda para as próximas vagas.
+        Só guarda quando você escreveu algo diferente do que eu tinha posto."""
+        if not self.arquivo_aprendidas:
+            return []
+        novas = []
+        for frame in pagina.frames:
+            for (furl, idx), (pergunta, meu) in list(self.abertas.items()):
+                if furl != frame.url:
+                    continue
+                try:
+                    valor = frame.locator(f'[data-assistente="{idx}"]').input_value(timeout=800).strip()
+                except Exception:
+                    continue
+                if not valor or valor == (meu or "").strip():
+                    continue
+                if RE_PLACEHOLDER.search(pergunta) or not palavras_chave(pergunta):
+                    continue          # não sei qual é a pergunta: guardar viraria uma chave genérica
+                salvar_aprendida(self.arquivo_aprendidas, self.aprendidas, pergunta, valor)
+                self.abertas[(furl, idx)] = (pergunta, valor)
+                novas.append(pergunta)
+        return novas

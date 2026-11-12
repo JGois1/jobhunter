@@ -29,6 +29,7 @@ from vagas.trello import Trello
 RAIZ = Path(__file__).parent
 PERFIL_NAVEGADOR = RAIZ / "dados" / "navegador"   # perfil do Edge do assistente (logins, histórico)
 SESSAO = RAIZ / "dados" / "sessao.json"         # cópia dos cookies de login (inclui os "de sessão")
+APRENDIDAS = RAIZ / "respostas_aprendidas.md"   # respostas que você deu nos formulários
 PORTA = 9333                                     # porta pela qual o script conversa com o Edge
 MAX_ETAPAS = 10                                  # trava de segurança do avanço automático
 SITES_LOGIN = [
@@ -134,10 +135,20 @@ def abrir_edge(urls=()) -> bool:
         if urls:
             subprocess.Popen([caminho_edge(), perfil, *urls])
         return True
-    subprocess.Popen([caminho_edge(), perfil, f"--remote-debugging-port={PORTA}",
-                      "--no-first-run", "--no-default-browser-check", "--start-maximized",
-                      "--hide-crash-restore-bubble", *(urls or ["about:blank"])])
+    subprocess.Popen([caminho_edge(), perfil, f"--remote-debugging-port={PORTA}", *OPCOES_EDGE,
+                      *(urls or ["about:blank"])])
     return porta_aberta(15)
+
+
+# Só para o Edge do assistente (o seu Edge normal não muda):
+# - sem sincronização e sem o Edge entrar sozinho na sua conta Microsoft. Sem isso ele abre a
+#   tela "Agora estamos sincronizando seus dados..." e espera você clicar em "Entendi";
+# - sem as telas de primeira execução e de "restaurar páginas".
+OPCOES_EDGE = [
+    "--no-first-run", "--no-default-browser-check", "--start-maximized", "--hide-crash-restore-bubble",
+    "--disable-sync",
+    "--disable-features=msImplicitSignin,msForceBrowserSignIn,msEdgeImplicitSignin",
+]
 
 
 AVISO_PERFIL_PRESO = """
@@ -318,15 +329,41 @@ def tentar_candidatar(ctx, pagina, preench, espera) -> tuple[bool, object]:
     return True, pagina
 
 
+JS_AVISO = r"""(t) => {
+  let d = document.getElementById('assistente-aviso');
+  if (!t) { if (d) d.remove(); return; }
+  if (!d) {
+    d = document.createElement('div'); d.id = 'assistente-aviso';
+    d.style.cssText = 'position:fixed;left:16px;bottom:16px;z-index:2147483647;max-width:460px;' +
+      'background:#111827;color:#f9fafb;font:15px/1.45 "Segoe UI",Arial,sans-serif;padding:12px 16px;' +
+      'border-radius:10px;border-left:6px solid #f59e0b;box-shadow:0 8px 28px rgba(0,0,0,.4);' +
+      'pointer-events:none';            // não atrapalha cliques na página
+    document.documentElement.appendChild(d);
+  }
+  d.textContent = '🤖 Assistente: ' + t;
+}"""
+
+
+def aviso_na_pagina(pagina, texto: str):
+    """Mostra (ou apaga, com texto vazio) uma caixinha no canto da página dizendo o que eu espero."""
+    try:
+        pagina.evaluate(JS_AVISO, texto)
+    except Exception:
+        pass
+
+
 def explicar_sem_botao(pagina, preench) -> bool:
     """Explica por que não cliquei. Devolve True se o motivo é falta de login."""
     host = urlparse(pagina.url).netloc
     if preench.parece_deslogado(pagina):
         print(f"   🔑 parece que você não está logado em {host}: entre nessa janela "
               "(pode usar o Google) e aperte Enter aqui. Eu volto para a vaga sozinho.")
+        aviso_na_pagina(pagina, "você não está logado neste site. Entre (pode usar o Google) "
+                                "e depois aperte Enter no terminal.")
         return True
     print("   não reconheci o botão de candidatura: clique você no navegador e aperte Enter aqui")
     print("   (evite 'Candidatura rápida' / '1 clique': costuma enviar sem você revisar)")
+    aviso_na_pagina(pagina, "não achei o botão de candidatura. Clique você e depois aperte Enter no terminal.")
     vistos = {b["texto"] for b in preench.textos_botoes(pagina)
               if re.search(r"candid|aplic|inscr|apply", b["texto"], re.I)}
     if vistos:
@@ -345,6 +382,9 @@ def processar_vaga(ctx, cfg, cartao, preench, trello, pagina) -> str:
         print(f"   ✋ em {urlparse(pagina.url).netloc} o botão de candidatura já ENVIA com o currículo "
               "cadastrado lá.\n      Confira a vaga, clique você se quiser e digite s aqui "
               "(se aparecerem perguntas, aperte Enter que eu preencho).")
+        aviso_na_pagina(pagina, "neste site o botão 'Candidatar-se' já ENVIA o currículo que você tem "
+                                "cadastrado aqui, então não clico nele. Se quiser a vaga, clique você e "
+                                "digite s no terminal (d = descartar, p = pular).")
     else:
         clicou, pagina = tentar_candidatar(ctx, pagina, preench, espera=10)
     # sem o botão, a primeira coisa é esperar você (login ou clique); não mexo na página da vaga
@@ -356,6 +396,7 @@ def processar_vaga(ctx, cfg, cartao, preench, trello, pagina) -> str:
     while True:
         ativa = aba_ativa(ctx)
         if not esperar_voce:
+            aviso_na_pagina(ativa, "")               # apaga o aviso anterior: estou trabalhando
             login = preench.tela_de_login(ativa)
             rel = preench.preencher(ativa)
             mostrar(rel)
@@ -363,6 +404,7 @@ def processar_vaga(ctx, cfg, cartao, preench, trello, pagina) -> str:
             revisar = bool(rel["pendentes"] or rel["perguntas"])
             if login:
                 print("   🔑 tela de login: entre (pode usar o Google) e aperte Enter aqui")
+                aviso_na_pagina(ativa, "entre na sua conta (pode usar o Google) e depois aperte Enter no terminal.")
             elif auto and (rel["campos"] or clicou) and not revisar and etapas < MAX_ETAPAS:
                 res, txt = preench.avancar(ativa)
                 if res == "avancou":
@@ -372,16 +414,35 @@ def processar_vaga(ctx, cfg, cartao, preench, trello, pagina) -> str:
                     continue
                 if res == "envio":
                     print(f"   ✋ última etapa: confira e clique VOCÊ em '{txt}' no site; depois digite s aqui")
+                    aviso_na_pagina(ativa, f"última etapa! Confira tudo e clique VOCÊ em '{txt}'. "
+                                           "Depois digite s no terminal.")
                 elif res == "travou":
                     print(f"   cliquei em '{txt}' mas a página não mudou: veja o que o site pediu, resolva e aperte Enter")
+                    aviso_na_pagina(ativa, f"cliquei em '{txt}' mas nada mudou. Veja o que o site pediu, "
+                                           "resolva e aperte Enter no terminal.")
                 elif clicou and not rel["campos"]:
                     print("   (não achei campos nem botão de próxima etapa: siga no navegador e aperte Enter)")
+                    aviso_na_pagina(ativa, "não sei o próximo passo aqui. Siga você e aperte Enter no terminal.")
             elif revisar:
-                print("   revise o que marquei acima no navegador e aperte Enter para eu continuar")
+                if any("BRANCO" in e for _, e in rel["perguntas"]):
+                    print("   responda as perguntas em branco no site e aperte Enter: eu guardo suas respostas"
+                          " e nas próximas vagas elas já vêm preenchidas")
+                    aviso_na_pagina(ativa, "responda as perguntas em branco e confira as que preenchi. Depois "
+                                           "aperte Enter no terminal (eu guardo suas respostas para as próximas vagas).")
+                else:
+                    print("   confira o que marquei acima no navegador e aperte Enter para eu continuar")
+                    aviso_na_pagina(ativa, "confira o que preenchi e aperte Enter no terminal para eu continuar.")
         esperar_voce = False
 
         cmd = input("   [Enter]=continuar  s=enviei  d=descartar  p=pular  q=sair: ").strip().lower()
         salvar_sessao(ctx)                       # guarda o login, caso você tenha entrado agora
+        try:
+            for pergunta in preench.aprender(aba_ativa(ctx)):
+                print(f"   📚 guardei sua resposta para \"{pergunta[:70]}\"")
+        except NavegadorFechado:
+            raise
+        except Exception:
+            pass                                 # aprender é bônus: nunca atrapalha a candidatura
         if cmd in ("s", "d", "p", "q"):
             if cmd in ("s", "d") and not (trello and cartao.get("id")):
                 print("   (vaga avulsa: não mexi no Trello)")
@@ -415,6 +476,7 @@ def processar_vaga(ctx, cfg, cartao, preench, trello, pagina) -> str:
 def processar_fila(ctx, cfg, fila, trello):
     dados = json.loads((RAIZ / "dados_pessoais.json").read_text(encoding="utf-8"))
     respostas = carregar_respostas(RAIZ / "respostas.md")
+    aprendidas = carregar_respostas(APRENDIDAS)          # cresce durante a execução
     perfil = (RAIZ / "perfil.md").read_text(encoding="utf-8")
     print(f"{len(fila)} vaga(s) para processar.{AJUDA}")
 
@@ -430,7 +492,8 @@ def processar_fila(ctx, cfg, fila, trello):
             print("   cartão sem link da vaga — pulando")
             continue
         print(f"   {cartao['url_vaga']}")
-        preench = Preenchedor(dados, respostas, escritor_claude(cfg, perfil, cartao["desc"]))
+        preench = Preenchedor(dados, respostas, escritor_claude(cfg, perfil, cartao["desc"]),
+                              aprendidas, APRENDIDAS)
         if processar_vaga(ctx, cfg, cartao, preench, trello, aba) == "q":
             return
         for outra in ctx.pages:                  # fecha abas extras antes da próxima vaga

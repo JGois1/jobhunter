@@ -31,6 +31,10 @@ perfil, organiza tudo no Trello e preenche os formulários de candidatura para v
      para quando falta um campo obrigatório, quando escreveu uma resposta aberta (para você
      revisar) e sempre que aparece um botão de envio ("Enviar", "Finalizar", "Concluir"...).
      Para desligar o avanço automático: `"avancar_etapas_sozinho": false` no `config.json`;
+   - **perguntas do recrutador** ("Qual sua última remuneração?", "Tem disponibilidade...?"): ele
+     preenche o que já sabe (suas respostas anteriores, seus dados, `respostas.md`) e para para
+     você conferir. As que ficarem em branco, responda no site e aperte Enter: ele **guarda a sua
+     resposta** em `respostas_aprendidas.md` e, na próxima vaga com pergunta parecida, já preenche;
    - **você confere e clica em Enviar no site.** O assistente nunca clica em botão de envio;
    - no terminal, digite `s` (enviei), `d` (descartar), `p` (pular) ou só **Enter** para ele
      continuar de onde parou.
@@ -67,6 +71,7 @@ manualmente de vez em quando.
 |---|---|
 | `dados_pessoais.json` | Dados que vão nos formulários. Campo vazio = o assistente não mexe. |
 | `respostas.md` | Respostas padrão para perguntas abertas. **Revise, é a sua voz.** |
+| `respostas_aprendidas.md` | Respostas que você deu nos formulários (o assistente cria e atualiza sozinho). Fica fora do GitHub. |
 | `perfil.md` | Resumo do seu currículo, usado para dar notas e escrever respostas. |
 | `config.json` | Termos de busca, cidades, nota mínima para ir ao Trello etc. |
 | `.env` | Chaves do Trello e do Claude. Nunca compartilhe. |

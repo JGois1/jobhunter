@@ -1,9 +1,10 @@
 # Respostas padrão para perguntas abertas
 
 Cada seção começa com `## palavra1 | palavra2 | ...`. Quando a pergunta do formulário contém
-uma dessas palavras, o texto da seção é colado na resposta. **Revise e edite à vontade, é a sua voz.**
-Se a chave do Claude estiver no .env, ele escreve uma resposta sob medida para cada vaga
-e estes textos só são usados se a chamada falhar.
+essas palavras, o texto da seção é colado na resposta. **Revise e edite à vontade, é a sua voz.**
+Ordem que o assistente usa: 1) o que você já respondeu antes (respostas_aprendidas.md),
+2) seus dados (dados_pessoais.json) em perguntas curtas, 3) o Claude, se a chave estiver no .env,
+4) estes textos.
 
 ## fale sobre voce | conte sobre voce | apresente | quem e voce | about yourself | resumo
 Sou estudante de Análise e Desenvolvimento de Sistemas no Ibmec Rio, com formatura prevista para o fim de 2027. Já estagiei em engenharia de software na Pro Software, desenvolvendo sistemas web em .NET e otimizando consultas em SQL Server. Nos meus projetos pessoais construí uma API REST em C#/.NET com Docker e deploy na AWS, e um pipeline de dados com Python, S3, PostgreSQL e Power BI. Gosto de entender o problema de ponta a ponta e aprendo rápido.
