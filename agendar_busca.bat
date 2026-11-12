@@ -13,7 +13,7 @@ REM O Indeed fica de fora da busca automatica: ele abre uma janela do navegador.
 > "%PASTA%rodar_busca.bat" (
   echo @echo off
   echo cd /d "%PASTA%"
-  echo "%PY%" buscar.py --fontes gupy vagas.com infojobs jobzi ^>^> dados\log_busca.txt 2^>^&1
+  echo "%PY%" buscar.py --fontes gupy solides linkedin vagas.com infojobs jobzi ^>^> dados\log_busca.txt 2^>^&1
 )
 
 schtasks /Create /TN "Busca Estagios TI" /TR "\"%PASTA%rodar_busca.bat\"" /SC DAILY /ST 08:00 /F

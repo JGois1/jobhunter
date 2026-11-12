@@ -16,7 +16,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from vagas.fontes import TODAS
+from vagas.fontes import TODAS, completar_descricoes
 from vagas.triagem import Triador, pre_filtrar
 
 RAIZ = Path(__file__).parent
@@ -64,7 +64,11 @@ def main():
         print("Nada novo desta vez.")
         return
 
-    # 3) triagem
+    # 3) triagem (antes, busca a descrição das vagas que vieram sem ela, como as do LinkedIn)
+    sem_desc = [v for v in novas if not v.descricao]
+    if sem_desc:
+        print(f"→ buscando a descrição de {len(sem_desc)} vagas que vieram sem ela...")
+        print(f"   {completar_descricoes(sem_desc)} completadas")
     triador = Triador(cfg, perfil)
     print(f"→ avaliando {len(novas)} vagas "
           f"({'Claude ' + cfg['modelo_claude'] if triador.usando_claude else 'palavras-chave — sem ANTHROPIC_API_KEY'})...")

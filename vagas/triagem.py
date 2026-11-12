@@ -11,6 +11,10 @@ from .modelo import Vaga, normalizar
 
 RE_ESTAGIO = re.compile(r"\b(estag|intern)", re.I)
 RE_REMOTO = re.compile(r"remot|home ?office|todo brasil|100% online", re.I)
+# vaga remota, mas para outro país (ex.: estágio nos EUA que o LinkedIn mostra como "remoto")
+RE_EXTERIOR = re.compile(r"estados unidos|united states|(^|[^a-z])usa([^a-z]|$)|canad|portugal|reino unido|"
+                         r"united kingdom|alemanha|germany|espanha|spain|mexico|argentina|chile|colombia|"
+                         r"india", re.I)
 
 
 def eh_estagio(v: Vaga) -> bool:
@@ -19,6 +23,8 @@ def eh_estagio(v: Vaga) -> bool:
 
 def local_ok(v: Vaga, cfg) -> bool:
     texto = normalizar(f"{v.local} {v.modalidade}")
+    if RE_EXTERIOR.search(normalizar(v.local)) and not any(normalizar(c) in texto for c in cfg["cidades_aceitas"]):
+        return False
     if RE_REMOTO.search(texto):
         return True
     return any(normalizar(c) in texto for c in cfg["cidades_aceitas"])
@@ -106,12 +112,28 @@ class Triador:
         return v
 
     def _avaliar_palavras(self, v: Vaga) -> Vaga:
+        """Nota sem Claude. O título decide a faixa; suas skills na vaga sobem a nota.
+        - título de TI puro ("Estágio em Tecnologia", "Data Analytics"): começa em 6 (vai pro Trello)
+        - TI misturada com outra área ou foco (suporte, administrativo, operações): começa em 4
+        - título sem TI (passou pelo filtro só pela descrição): no máximo 5; área de fora no título: no máximo 3
+        - cada skill sua que aparece na vaga: +1 (até 10). Falta de descrição não tira ponto."""
+        titulo = normalizar(v.titulo)
         texto = normalizar(f"{v.titulo} {v.descricao}")
         achadas = [s.rstrip("*") for s in self.cfg["minhas_skills"] if contem(texto, s)]
-        ti_no_titulo = any(contem(normalizar(v.titulo), p) for p in self.cfg["palavras_ti_titulo"])
-        v.nota = min(10 if ti_no_titulo else 5, (3 if ti_no_titulo else 1) + 2 * len(achadas))
-        v.motivo = ("Nota por palavras-chave (sem Claude). Skills encontradas: "
-                    + (", ".join(achadas) or "nenhuma"))
+        ti = any(contem(titulo, p) for p in self.cfg["palavras_ti_titulo"])
+        fora = [p.rstrip("*") for p in self.cfg.get("areas_fora_ti", []) if contem(titulo, p)]
+        periferica = [p.rstrip("*") for p in self.cfg.get("ti_periferica", []) if contem(titulo, p)]
+        if ti and not fora and not periferica:
+            base, teto, faixa = 6, 10, "título de TI"
+        elif ti:
+            base, teto, faixa = 4, 8, f"TI misturada com {', '.join(fora + periferica)}"
+        else:
+            base, teto, faixa = 2, (3 if fora else 5), (f"título de outra área ({', '.join(fora)})" if fora
+                                                       else "título sem TI")
+        v.nota = min(teto, base + len(achadas))
+        sem_desc = " Sem descrição completa: confira a vaga." if len(v.descricao) < 200 else ""
+        v.motivo = (f"Nota por palavras-chave (sem Claude): {faixa}; suas skills na vaga: "
+                    + (", ".join(achadas) or "nenhuma") + "." + sem_desc)
         return v
 
     def avaliar_todas(self, vagas: list[Vaga]) -> list[Vaga]:

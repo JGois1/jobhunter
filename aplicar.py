@@ -42,6 +42,7 @@ SITES_LOGIN = [
     "https://www.catho.com.br/",
     "https://www.empregos.com.br/",
     "https://portal.ciee.org.br/",
+    "https://www.linkedin.com/login",
 ]
 RE_URL_LOGIN = re.compile(r"login|signin|sign-in|auth|entrar|acessar", re.I)
 # Sites em que o botão "Candidatar-se" já ENVIA na hora, com o currículo cadastrado lá.
@@ -63,7 +64,8 @@ def mesma_vaga(a: str, b: str) -> bool:
     return xa.startswith(xb) or xb.startswith(xa)
 
 AJUDA = """
-  [Enter]  continuar (preenche a tela e avança as etapas até o botão de envio)
+  Na fase 2, para cada vaga:
+  [Enter]  continuar (depois de você resolver o que eu pedi, eu sigo preenchendo e avançando)
   s        já ENVIEI → move o cartão para "Aplicada"
   d        descartar → move para "Descartada / Recusada"
   p        pular por agora (o cartão fica em "Vou aplicar")
@@ -192,6 +194,10 @@ class NavegadorFechado(Exception):
     pass
 
 
+class AbaFechada(Exception):
+    pass
+
+
 def aba_ativa(ctx):
     """A aba mais recente que é um site (ignora páginas internas do Edge, como edge://welcome)."""
     abas = ctx.pages
@@ -206,9 +212,11 @@ def abrir_link(pagina, url):
     (boas-vindas, sincronização) logo depois de abrir."""
     for tentativa in range(3):
         try:
-            pagina.goto(url, wait_until="domcontentloaded")
+            pagina.goto(url, wait_until="domcontentloaded", timeout=60000)
             return
         except Exception as e:
+            if "Timeout" in str(e) and pagina.url.startswith("http"):
+                return                    # site lento: sigo com o que já carregou
             if tentativa == 2 or not re.search(r"interrupted|ERR_ABORTED|detached", str(e)):
                 raise
             pagina.wait_for_timeout(1500)
@@ -306,6 +314,8 @@ def login_manual():
 
 # ------------------------------------------------------------------ candidatura
 def mostrar(rel):
+    for pergunta in rel.get("aprendidas", []):
+        print(f"   📚 guardei a resposta que já estava na tela: \"{pergunta[:70]}\"")
     for rotulo, valor in rel["preenchidos"]:
         print(f"   ✓ {rotulo}: {valor}")
     for pergunta, estado in rel["perguntas"]:
@@ -314,19 +324,6 @@ def mostrar(rel):
         print(f"   ! obrigatório sem resposta: {p}")
     if rel["campos"] and not (rel["preenchidos"] or rel["perguntas"] or rel["pendentes"]):
         print(f"   ({rel['campos']} campo(s) na tela; nada para eu preencher aqui)")
-
-
-def tentar_candidatar(ctx, pagina, preench, espera) -> tuple[bool, object]:
-    """Clica no botão de candidatura. Devolve (clicou?, aba onde o formulário está)."""
-    n_abas = len(ctx.pages)
-    if not preench.clicar_candidatar(pagina, espera=espera):
-        return False, pagina
-    print("   cliquei no botão de candidatura")
-    pagina.wait_for_timeout(1500)
-    if len(ctx.pages) > n_abas:                 # o site abriu o formulário em outra aba
-        pagina = aba_ativa(ctx)
-    preench.esperar_campos(pagina, 10)          # o formulário costuma carregar depois
-    return True, pagina
 
 
 JS_AVISO = r"""(t) => {
@@ -352,155 +349,355 @@ def aviso_na_pagina(pagina, texto: str):
         pass
 
 
-def explicar_sem_botao(pagina, preench) -> bool:
-    """Explica por que não cliquei. Devolve True se o motivo é falta de login."""
-    host = urlparse(pagina.url).netloc
-    if preench.parece_deslogado(pagina):
-        print(f"   🔑 parece que você não está logado em {host}: entre nessa janela "
-              "(pode usar o Google) e aperte Enter aqui. Eu volto para a vaga sozinho.")
-        aviso_na_pagina(pagina, "você não está logado neste site. Entre (pode usar o Google) "
-                                "e depois aperte Enter no terminal.")
+# ------------------------------------------------------------------ uma candidatura
+# Cada vaga é uma Candidatura: tem a sua própria aba e lembra onde parou e por quê.
+# Fase 1 (sem você): abro todas e levo cada uma até onde dá.
+# Fase 2 (com você): mostro uma por uma, já no ponto em que precisa de você.
+ETAPAS_GUPY = {}                     # id da candidatura na Gupy -> etapas da vaga (lidas da própria página)
+RE_GUPY_ETAPAS = re.compile(r"/selection-process/candidate/application/(\d+)/step(\?|$)")
+ICONES = {"envio": "✋ pronta p/ enviar", "perguntas": "❓ perguntas", "confira": "👀 conferir",
+          "aceite": "☑ marcar aceite",
+          "pendentes": "❗ campo obrigatório", "login": "🔑 precisa de login", "travou": "⚠ travou",
+          "nada": "❔ próximo passo", "sem_botao": "❔ sem botão", "direto": "↗ envio direto",
+          "erro": "💥 erro"}
+ORDEM = ["envio", "aceite", "perguntas", "confira", "pendentes", "login", "travou", "nada", "sem_botao", "direto", "erro"]
+STATUS_TRELLO = {"envio": "pronta", "direto": "direto"}       # o resto vira "precisa de você"
+
+
+class Candidatura:
+    conhecidas = set()        # abas que já pertencem a alguma vaga (para achar a aba nova de cada uma)
+
+    def __init__(self, ctx, cfg, cartao, preench, aba):
+        self.ctx, self.cfg, self.cartao, self.preench, self.aba = ctx, cfg, cartao, preench, aba
+        Candidatura.conhecidas.add(aba)
+        self.url = cartao["url_vaga"]
+        self.clicou = self.direto = False
+        self.etapas = 0
+        self.parada = ("nada", "", "")             # (tipo, mensagem no terminal, mensagem na página)
+
+    # ---------------------------------------------------------- avisos
+    def parar(self, tipo, terminal, pagina=None):
+        self.parada = (tipo, terminal, pagina or terminal)
+        print(f"   {terminal}")
+        aviso_na_pagina(self.aba, self.parada[2])
+
+    def mostrar_parada(self):
+        tipo, terminal, pagina = self.parada
+        print(f"   {terminal}")
+        aviso_na_pagina(self.aba, pagina)
+
+    # ---------------------------------------------------------- abrir a vaga e clicar
+    def tentar_candidatar(self, espera) -> bool:
+        antes = set(self.ctx.pages)
+        if not self.preench.clicar_candidatar(self.aba, espera=espera):
+            return False
+        print("   cliquei no botão de candidatura")
+        self.aba.wait_for_timeout(1500)
+        novas = [pg for pg in self.ctx.pages if pg not in antes]
+        if novas:                                   # o site abriu o formulário em outra aba
+            self.aba = novas[-1]
+            Candidatura.conhecidas.add(self.aba)
+        self.preench.esperar_tela(self.aba, 15)     # o formulário costuma carregar depois
+        self.clicou = True
         return True
-    print("   não reconheci o botão de candidatura: clique você no navegador e aperte Enter aqui")
-    print("   (evite 'Candidatura rápida' / '1 clique': costuma enviar sem você revisar)")
-    aviso_na_pagina(pagina, "não achei o botão de candidatura. Clique você e depois aperte Enter no terminal.")
-    vistos = {b["texto"] for b in preench.textos_botoes(pagina)
-              if re.search(r"candid|aplic|inscr|apply", b["texto"], re.I)}
-    if vistos:
-        print(f"   botões parecidos que vi na página: {sorted(vistos)}")
-    return False
 
+    def abrir(self):
+        """Abre a vaga e clica em candidatar-se (quando é seguro). Define a parada se não der."""
+        self.clicou, self.etapas = False, 0
+        abrir_link(self.aba, self.url)
+        self.aba.wait_for_timeout(2000)
+        self.direto = envia_direto(self.aba.url)
+        if self.direto:
+            self.parar("direto",
+                       f"↗ em {urlparse(self.aba.url).netloc} o botão de candidatura já ENVIA com o currículo "
+                       "cadastrado lá, então não clico. Se quiser a vaga, clique você e digite s "
+                       "(se aparecerem perguntas, aperte Enter que eu preencho).",
+                       "neste site o botão 'Candidatar-se' já ENVIA o currículo que você tem cadastrado aqui, "
+                       "então não clico nele. Se quiser a vaga, clique você e digite s no terminal.")
+            return
+        if self.tentar_candidatar(espera=10):
+            return
+        if self.preench.parece_deslogado(self.aba):
+            self.parar("login",
+                       f"🔑 você não está logado em {urlparse(self.aba.url).netloc}: entre nessa aba "
+                       "(pode usar o Google) e aperte Enter. Eu volto para a vaga sozinho.",
+                       "você não está logado neste site. Entre (pode usar o Google) e depois aperte Enter no terminal.")
+            return
+        vistos = sorted({b["texto"] for b in self.preench.textos_botoes(self.aba)
+                         if re.search(r"candid|aplic|inscr|apply", b["texto"], re.I)})
+        extra = f" (botões parecidos: {vistos})" if vistos else ""
+        self.parar("sem_botao",
+                   f"❔ não reconheci o botão de candidatura{extra}: clique você e aperte Enter. "
+                   "Evite 'Candidatura rápida'/'1 clique': costuma enviar sem revisão.",
+                   "não achei o botão de candidatura. Clique você e depois aperte Enter no terminal.")
 
-def processar_vaga(ctx, cfg, cartao, preench, trello, pagina) -> str:
-    """Uma vaga, do link até você decidir. Devolve o comando final (s/d/p/q)."""
-    url = cartao["url_vaga"]
-    abrir_link(pagina, url)
-    pagina.wait_for_timeout(2000)
-    direto = envia_direto(pagina.url)
-    if direto:
-        clicou = False
-        print(f"   ✋ em {urlparse(pagina.url).netloc} o botão de candidatura já ENVIA com o currículo "
-              "cadastrado lá.\n      Confira a vaga, clique você se quiser e digite s aqui "
-              "(se aparecerem perguntas, aperte Enter que eu preencho).")
-        aviso_na_pagina(pagina, "neste site o botão 'Candidatar-se' já ENVIA o currículo que você tem "
-                                "cadastrado aqui, então não clico nele. Se quiser a vaga, clique você e "
-                                "digite s no terminal (d = descartar, p = pular).")
-    else:
-        clicou, pagina = tentar_candidatar(ctx, pagina, preench, espera=10)
-    # sem o botão, a primeira coisa é esperar você (login ou clique); não mexo na página da vaga
-    esperar_voce = not clicou
-    voltar_para_vaga = (not clicou and not direto) and explicar_sem_botao(pagina, preench)
+    # ---------------------------------------------------------- preencher e avançar
+    def checar_aba(self):
+        if self.aba.is_closed():
+            if not any(not pg.is_closed() for pg in self.ctx.pages):
+                raise NavegadorFechado()
+            raise AbaFechada()
 
-    auto = cfg.get("avancar_etapas_sozinho", True) and not direto
-    etapas = 0
-    while True:
-        ativa = aba_ativa(ctx)
-        if not esperar_voce:
-            aviso_na_pagina(ativa, "")               # apaga o aviso anterior: estou trabalhando
-            login = preench.tela_de_login(ativa)
-            rel = preench.preencher(ativa)
+    def trabalhar(self):
+        """Preenche e avança etapas até precisar de você. Nunca clica em envio."""
+        auto = self.cfg.get("avancar_etapas_sozinho", True) and not self.direto
+        self._esperou = False
+        while True:
+            self.checar_aba()
+            aviso_na_pagina(self.aba, "")           # apaga o aviso anterior: estou trabalhando
+            login = self.preench.tela_de_login(self.aba)
+            rel = self.preench.preencher(self.aba)
             mostrar(rel)
-            # para e espera você quando falta algo ou quando escrevi texto que você deve revisar
-            revisar = bool(rel["pendentes"] or rel["perguntas"])
             if login:
-                print("   🔑 tela de login: entre (pode usar o Google) e aperte Enter aqui")
-                aviso_na_pagina(ativa, "entre na sua conta (pode usar o Google) e depois aperte Enter no terminal.")
-            elif auto and (rel["campos"] or clicou) and not revisar and etapas < MAX_ETAPAS:
-                res, txt = preench.avancar(ativa)
-                if res == "avancou":
-                    etapas += 1
-                    print(f"   ➜ cliquei em '{txt}' (etapa {etapas + 1})")
-                    preench.esperar_campos(aba_ativa(ctx), 5)
+                return self.parar("login", "🔑 tela de login: entre (pode usar o Google) e aperte Enter.",
+                                  "entre na sua conta (pode usar o Google) e depois aperte Enter no terminal.")
+            em_branco = [p for p, e in rel["perguntas"] if "BRANCO" in e]
+            if em_branco:
+                return self.parar("perguntas",
+                                  f"❓ {len(em_branco)} pergunta(s) em branco: responda no site e aperte Enter "
+                                  "(eu guardo suas respostas para as próximas vagas).",
+                                  "responda as perguntas em branco e confira as que preenchi. Depois aperte Enter "
+                                  "no terminal (eu guardo suas respostas para as próximas vagas).")
+            if rel["pendentes"]:
+                return self.parar("pendentes", "❗ falta campo obrigatório (veja acima): preencha no site e aperte Enter.",
+                                  "falta preencher campo obrigatório. Preencha e aperte Enter no terminal.")
+            # respostas da sua memória ou dos seus dados seguem direto; texto padrão/Claude você confere
+            if any("confira" in e for _, e in rel["perguntas"]):
+                return self.parar("confira", "👀 confira as respostas que escrevi (texto padrão) e aperte Enter.",
+                                  "confira as respostas que escrevi e aperte Enter no terminal para eu continuar.")
+            if rel["aceites"]:
+                aceite = rel["aceites"][0][:80]
+                envio = self.preench.botao_envio(self.aba)
+                if envio:
+                    return self.parar("envio", f"✋ última etapa: marque você '{aceite}' e clique VOCÊ em '{envio}'; "
+                                      f"depois digite s.{self.aviso_testes()}",
+                                      f"última etapa! Marque '{aceite}' e clique VOCÊ em '{envio}'. "
+                                      "Depois digite s no terminal.")
+                return self.parar("aceite", f"☑ marque você a caixinha '{aceite}' (aceite de termos eu não marco "
+                                  "por você) e aperte Enter.",
+                                  f"marque a caixinha '{aceite}' (aceite de termos é com você) e aperte Enter no terminal.")
+            if not (auto and (rel["campos"] or self.clicou)):
+                if self.direto:
+                    return self.parar("direto", "↗ nada para eu preencher aqui. Se você já se candidatou, digite s.",
+                                      "nada para eu preencher aqui. Se você já se candidatou, digite s no terminal.")
+                return self.parar("nada", "❔ siga você no navegador e aperte Enter.",
+                                  "não sei o próximo passo aqui. Siga você e aperte Enter no terminal.")
+            if self.etapas >= MAX_ETAPAS:
+                return self.parar("travou", f"⚠ já avancei {MAX_ETAPAS} etapas; siga você e aperte Enter.")
+            res, txt = self.preench.avancar(self.aba)
+            if res == "avancou":
+                self.etapas += 1
+                print(f"   ➜ cliquei em '{txt}' (etapa {self.etapas + 1})")
+                self.preench.esperar_tela(self.aba, 15)
+                continue
+            if res == "envio":
+                return self.parar("envio", f"✋ última etapa: confira e clique VOCÊ em '{txt}'; depois digite s."
+                                  f"{self.aviso_testes()}",
+                                  f"última etapa! Confira tudo e clique VOCÊ em '{txt}'. Depois digite s no terminal.")
+            if res == "travou":
+                return self.parar("travou", f"⚠ cliquei em '{txt}' mas nada mudou: veja o que o site pediu e aperte Enter.",
+                                  f"cliquei em '{txt}' mas nada mudou. Veja o que o site pediu, resolva e aperte Enter no terminal.")
+            if not getattr(self, "_esperou", False):     # talvez a tela ainda estivesse carregando
+                self._esperou = True
+                if self.preench.esperar_tela(self.aba, 15):
                     continue
-                if res == "envio":
-                    print(f"   ✋ última etapa: confira e clique VOCÊ em '{txt}' no site; depois digite s aqui")
-                    aviso_na_pagina(ativa, f"última etapa! Confira tudo e clique VOCÊ em '{txt}'. "
-                                           "Depois digite s no terminal.")
-                elif res == "travou":
-                    print(f"   cliquei em '{txt}' mas a página não mudou: veja o que o site pediu, resolva e aperte Enter")
-                    aviso_na_pagina(ativa, f"cliquei em '{txt}' mas nada mudou. Veja o que o site pediu, "
-                                           "resolva e aperte Enter no terminal.")
-                elif clicou and not rel["campos"]:
-                    print("   (não achei campos nem botão de próxima etapa: siga no navegador e aperte Enter)")
-                    aviso_na_pagina(ativa, "não sei o próximo passo aqui. Siga você e aperte Enter no terminal.")
-            elif revisar:
-                if any("BRANCO" in e for _, e in rel["perguntas"]):
-                    print("   responda as perguntas em branco no site e aperte Enter: eu guardo suas respostas"
-                          " e nas próximas vagas elas já vêm preenchidas")
-                    aviso_na_pagina(ativa, "responda as perguntas em branco e confira as que preenchi. Depois "
-                                           "aperte Enter no terminal (eu guardo suas respostas para as próximas vagas).")
-                else:
-                    print("   confira o que marquei acima no navegador e aperte Enter para eu continuar")
-                    aviso_na_pagina(ativa, "confira o que preenchi e aperte Enter no terminal para eu continuar.")
-        esperar_voce = False
+            return self.parar("nada", "❔ não achei campos nem botão de próxima etapa: siga você e aperte Enter.",
+                              "não sei o próximo passo aqui. Siga você e aperte Enter no terminal.")
 
+    def testes_gupy(self) -> list[str]:
+        """Etapas online (testes) que a Gupy tem depois da candidatura, lidas dos dados da própria página."""
+        m = re.search(r"/applications/(\d+)", self.aba.url)
+        dados = ETAPAS_GUPY.get(m.group(1)) if m else None
+        if not dados:
+            return []
+        etapas = sorted((dados.get("job") or {}).get("jobSteps") or [], key=lambda e: float(e.get("order") or 0))
+        return [e.get("name", "") for e in etapas if e.get("type") == "online" and e.get("status") != "done"]
+
+    def aviso_testes(self) -> str:
+        testes = self.testes_gupy()
+        return (f"\n      Depois de finalizar, a Gupy tem etapas online que são com você: {', '.join(testes)}."
+                if testes else "")
+
+    def preparar(self):
+        """Fase 1: abre e vai até onde dá, sem perguntar nada."""
+        self.abrir()
+        if self.clicou:
+            self.trabalhar()
+
+    def continuar(self):
+        """Depois do seu Enter: retoma de onde parou."""
+        tipo = self.parada[0]
+        if not self.clicou:
+            # você mesmo clicou e o site abriu o formulário numa aba nova: passo a usar essa aba
+            novas = [pg for pg in self.ctx.pages if pg not in Candidatura.conhecidas and not pg.is_closed()
+                     and not pg.url.startswith(("edge://", "chrome://", "about:"))]
+            if novas:
+                self.aba = novas[-1]
+                Candidatura.conhecidas.add(self.aba)
+                print("   (achei o formulário na aba nova)")
+        if tipo == "login" and not self.preench.tela_de_login(self.aba):
+            print("   voltando para a vaga...")         # você entrou: recomeço pela página da vaga
+            self.preparar()
+            return
+        if not (self.clicou or self.direto) and mesma_vaga(self.aba.url, self.url) \
+                and not self.preench.esperar_campos(self.aba, 0.1):
+            # ainda na página da vaga e sem formulário: o botão pode ter aparecido agora.
+            # (dentro de um formulário eu NÃO procuro "Candidatar-se": lá ele pode ser o envio)
+            self.tentar_candidatar(espera=3)
+        self.trabalhar()
+
+
+# ------------------------------------------------------------------ a fila inteira
+def marcar_trello(trello, cartao, c: "Candidatura | None", final: str = ""):
+    if not (trello and cartao.get("id")):
+        return
+    try:
+        if final:
+            trello.limpar_status(cartao)
+            return
+        tipo, terminal, _ = c.parada
+        status = STATUS_TRELLO.get(tipo, "voce")
+        texto = re.sub(r"^\W+\s*", "", terminal)
+        trello.marcar_status(cartao, status, f"🤖 {datetime.now():%d/%m %H:%M} — {texto}")
+    except Exception as e:
+        print(f"   (não consegui atualizar o Trello: {e})")
+
+
+def decidir(c: Candidatura, trello, ctx) -> str:
+    """Fase 2 de uma vaga: espera você, retoma depois de cada Enter. Devolve s/d/p/q."""
+    while True:
         cmd = input("   [Enter]=continuar  s=enviei  d=descartar  p=pular  q=sair: ").strip().lower()
         salvar_sessao(ctx)                       # guarda o login, caso você tenha entrado agora
         try:
-            for pergunta in preench.aprender(aba_ativa(ctx)):
+            for pergunta in c.preench.aprender(c.aba):
                 print(f"   📚 guardei sua resposta para \"{pergunta[:70]}\"")
-        except NavegadorFechado:
-            raise
         except Exception:
             pass                                 # aprender é bônus: nunca atrapalha a candidatura
         if cmd in ("s", "d", "p", "q"):
-            if cmd in ("s", "d") and not (trello and cartao.get("id")):
+            if cmd in ("s", "d") and not (trello and c.cartao.get("id")):
                 print("   (vaga avulsa: não mexi no Trello)")
             elif cmd == "s":
-                trello.mover(cartao["id"], "Aplicada", f"Candidatura enviada em {datetime.now():%d/%m/%Y %H:%M}")
+                testes = c.testes_gupy()
+                extra = f"\nPróximas etapas online na Gupy (com você): {', '.join(testes)}" if testes else ""
+                trello.mover(c.cartao["id"], "Aplicada", f"Candidatura enviada em {datetime.now():%d/%m/%Y %H:%M}{extra}")
+                marcar_trello(trello, c.cartao, c, final="s")
                 print("   → movido para Aplicada")
             elif cmd == "d":
-                trello.mover(cartao["id"], "Descartada / Recusada", "Descartada antes de aplicar")
+                trello.mover(c.cartao["id"], "Descartada / Recusada", "Descartada antes de aplicar")
+                marcar_trello(trello, c.cartao, c, final="d")
                 print("   → movido para Descartada")
             return cmd
-        if clicou or direto:
-            continue
-        ativa = aba_ativa(ctx)
-        if voltar_para_vaga and not preench.tela_de_login(ativa):
-            # você acabou de entrar no site: o site pode ter te levado para outra página
-            voltar_para_vaga = False
-            if ativa.url.split("#")[0] != url:
-                print("   voltando para a vaga...")
-                abrir_link(ativa, url)
-                ativa.wait_for_timeout(2000)
-            clicou, _ = tentar_candidatar(ctx, ativa, preench, espera=10)
-            if not clicou:
-                voltar_para_vaga = explicar_sem_botao(ativa, preench)
-                esperar_voce = True
-        elif mesma_vaga(ativa.url, url) and not preench.esperar_campos(ativa, 0.1):
-            # ainda na página da vaga e sem formulário aberto: o botão pode ter aparecido agora.
-            # (dentro de um formulário eu NÃO procuro "Candidatar-se": lá ele pode ser o envio)
-            clicou, _ = tentar_candidatar(ctx, ativa, preench, espera=3)
+        try:
+            c.checar_aba()
+            c.continuar()
+        except AbaFechada:
+            print("   (a aba desta vaga foi fechada; deixei o cartão em 'Vou aplicar')")
+            return "p"
 
 
 def processar_fila(ctx, cfg, fila, trello):
+    from playwright.sync_api import Error as ErroNavegador
     dados = json.loads((RAIZ / "dados_pessoais.json").read_text(encoding="utf-8"))
     respostas = carregar_respostas(RAIZ / "respostas.md")
     aprendidas = carregar_respostas(APRENDIDAS)          # cresce durante a execução
     perfil = (RAIZ / "perfil.md").read_text(encoding="utf-8")
-    print(f"{len(fila)} vaga(s) para processar.{AJUDA}")
+    fila = [c for c in fila if c.get("url_vaga")]
+    print(f"{len(fila)} vaga(s).\n"
+          "FASE 1: vou abrir cada vaga numa aba e levar até onde der, sem te perguntar nada\n"
+          "        (pode deixar rodando e ir fazer outra coisa).\n"
+          f"FASE 2: te mostro uma por uma, já no ponto em que precisa de você.{AJUDA}")
 
-    # trabalha numa aba própria (as que o Edge abre sozinho ao iniciar podem sumir a qualquer hora)
-    aba = ctx.new_page()
-    for outra in ctx.pages:
-        if outra != aba:
-            outra.close()
+    Candidatura.conhecidas = set()
+    ETAPAS_GUPY.clear()
 
+    def ouvir(resposta):                     # a Gupy carrega as etapas da vaga: guardo para avisar dos testes
+        m = RE_GUPY_ETAPAS.search(resposta.url)
+        if m:
+            try:
+                ETAPAS_GUPY[m.group(1)] = resposta.json()
+            except Exception:
+                pass
+    ctx.on("response", ouvir)
+    iniciais = list(ctx.pages)                   # abas que o Edge abriu sozinho: fecho depois
+    cands = []
     for i, cartao in enumerate(fila, 1):
-        print(f"\n━━━ [{i}/{len(fila)}] {cartao['name']}")
-        if not cartao["url_vaga"]:
-            print("   cartão sem link da vaga — pulando")
-            continue
-        print(f"   {cartao['url_vaga']}")
-        preench = Preenchedor(dados, respostas, escritor_claude(cfg, perfil, cartao["desc"]),
+        print(f"\n━━━ FASE 1 [{i}/{len(fila)}] {cartao['name']}\n   {cartao['url_vaga']}")
+        preench = Preenchedor(dados, respostas, escritor_claude(cfg, perfil, cartao.get("desc", "")),
                               aprendidas, APRENDIDAS)
-        if processar_vaga(ctx, cfg, cartao, preench, trello, aba) == "q":
+        preench.autorizar_dados = cfg.get("autorizar_uso_de_dados", False)
+        c = Candidatura(ctx, cfg, cartao, preench, ctx.new_page())
+        if i == 1:
+            for pg in iniciais:
+                try:
+                    pg.close()
+                except Exception:
+                    pass
+        try:
+            c.preparar()
+        except ErroNavegador as e:
+            if not ctx.pages or navegador_fechado(e) and not any(not pg.is_closed() for pg in ctx.pages):
+                raise NavegadorFechado()
+            c.parada = ("erro", f"💥 deu erro nesta vaga ({str(e).splitlines()[0][:90]}). "
+                                "Veja a aba e siga você, ou digite p.", "")
+            print(f"   {c.parada[1]}")
+        marcar_trello(trello, cartao, c)
+        cands.append(c)
+
+    print("\n══════ RESUMO DA FASE 1 ══════")
+    cands.sort(key=lambda c: ORDEM.index(c.parada[0]))
+    for c in cands:
+        print(f"   {ICONES[c.parada[0]]:<22} {c.cartao['name'][:70]}")
+    prontas = sum(c.parada[0] == "envio" for c in cands)
+    print(f"\n{prontas} pronta(s) para você só conferir e enviar. Vamos uma por uma.")
+
+    for i, c in enumerate(cands, 1):
+        print(f"\n━━━ FASE 2 [{i}/{len(cands)}] {c.cartao['name']}")
+        try:
+            if c.aba.is_closed():
+                print("   (a aba desta vaga foi fechada; pulando)")
+                continue
+            c.aba.bring_to_front()
+            if c.parada[0] == "login" and not c.preench.tela_de_login(c.aba):
+                c.preparar()                     # talvez você já tenha entrado nesse site em outra aba
+            else:
+                c.mostrar_parada()
+            cmd = decidir(c, trello, ctx)
+        except ErroNavegador as e:
+            if not ctx.pages:
+                raise NavegadorFechado()
+            print(f"   (problema nesta aba: {str(e).splitlines()[0][:90]}; pulando)")
+            continue
+        if cmd == "q":
             return
-        for outra in ctx.pages:                  # fecha abas extras antes da próxima vaga
-            if outra != aba:
-                outra.close()
+        if cmd in ("s", "d"):
+            try:
+                c.aba.close()
+            except Exception:
+                pass
 
     print("\nFila concluída. Boa sorte! 🍀")
+
+
+TRAVA = RAIZ / "dados" / "aplicar.lock"
+
+
+def trava_execucao() -> bool:
+    """Impede dois aplicar.py ao mesmo tempo (um fecharia as abas do outro no mesmo Edge)."""
+    import atexit
+    if TRAVA.exists():
+        try:
+            pid = int(TRAVA.read_text().strip())
+            vivo = str(pid) in subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                                              capture_output=True, text=True).stdout
+        except Exception:
+            vivo = False
+        if vivo and pid != os.getpid():
+            print("⚠ Já tem um aplicar.py rodando (em outro terminal). Termine aquele (digite q) e rode de novo.")
+            return False
+    TRAVA.parent.mkdir(parents=True, exist_ok=True)
+    TRAVA.write_text(str(os.getpid()))
+    atexit.register(lambda: TRAVA.unlink(missing_ok=True))
+    return True
 
 
 def main():
@@ -525,6 +722,8 @@ def main():
             print('Nenhum cartão em "Vou aplicar". Mova no Trello as vagas que você quer e rode de novo.')
             return
 
+    if not trava_execucao():
+        return
     if not abrir_edge():
         print(AVISO_PERFIL_PRESO)
         return

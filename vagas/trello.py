@@ -11,7 +11,11 @@ from .modelo import Vaga
 API = "https://api.trello.com/1"
 COLUNAS = ["Encontradas", "Vou aplicar", "Aplicada", "Entrevista", "Descartada / Recusada"]
 CORES_FONTE = {"gupy": "green", "vagas.com": "blue", "infojobs": "orange",
-               "jobzi": "purple", "indeed": "sky"}
+               "jobzi": "purple", "indeed": "sky", "solides": "pink", "linkedin": "black"}
+# etiquetas que o aplicar.py coloca nos cartões de "Vou aplicar" (dá pra ver no quadro sem abrir)
+STATUS = {"pronta": ("🤖 pronta p/ enviar", "green"),
+          "voce": ("🤖 precisa de você", "orange"),
+          "direto": ("🤖 envio direto no site", "yellow")}
 
 
 class Trello:
@@ -59,12 +63,38 @@ class Trello:
     # ------------------------------------------------------------ fase 2
     def cartoes(self, coluna: str) -> list[dict]:
         """Cartões de uma coluna, já com a URL da vaga extraída da descrição."""
-        lista = self._req("GET", f"/lists/{self.colunas[coluna]}/cards", fields="name,desc,url")
+        lista = self._req("GET", f"/lists/{self.colunas[coluna]}/cards", fields="name,desc,url,idLabels")
         for c in lista:
             m = re.search(r"\*\*Link:\*\*\s*\[[^\]]*\]\(([^)]+)\)", c["desc"]) or \
                 re.search(r"https?://\S+", c["desc"] + " " + c["name"])
             c["url_vaga"] = (m.group(1) if m.groups() else m.group(0)) if m else ""
         return lista
+
+    def _etiqueta_status(self, status: str) -> str:
+        nome, cor = STATUS[status]
+        if nome not in self.etiquetas:
+            self.etiquetas[nome] = self._req("POST", "/labels", name=nome, color=cor, idBoard=self.quadro)["id"]
+        return self.etiquetas[nome]
+
+    def limpar_status(self, cartao: dict):
+        """Tira as etiquetas de status do assistente (as de fonte, tipo 'gupy', ficam)."""
+        ids = {self.etiquetas.get(nome) for nome, _ in STATUS.values()}
+        for lid in list(cartao.get("idLabels", [])):
+            if lid in ids:
+                self._req("DELETE", f"/cards/{cartao['id']}/idLabels/{lid}")
+                cartao["idLabels"].remove(lid)
+
+    def marcar_status(self, cartao: dict, status: str, comentario: str = ""):
+        """Troca a etiqueta de status do cartão e deixa um comentário com o detalhe."""
+        alvo = self._etiqueta_status(status)
+        for outro in STATUS:                     # garante que as 3 existem (para limpar depois)
+            self._etiqueta_status(outro)
+        if alvo not in cartao.get("idLabels", []):
+            self.limpar_status(cartao)
+            self._req("POST", f"/cards/{cartao['id']}/idLabels", value=alvo)
+            cartao.setdefault("idLabels", []).append(alvo)
+        if comentario:
+            self._req("POST", f"/cards/{cartao['id']}/actions/comments", text=comentario)
 
     def mover(self, cartao_id: str, coluna: str, comentario: str = ""):
         self._req("PUT", f"/cards/{cartao_id}", idList=self.colunas[coluna], pos="top")
